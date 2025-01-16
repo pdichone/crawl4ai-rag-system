@@ -1,5 +1,7 @@
 <!-- @format -->
 
+IF using supabase, do this:
+
 Must copy the site_pages.sql in the supabase editor
 
 THEN run the policy below:
