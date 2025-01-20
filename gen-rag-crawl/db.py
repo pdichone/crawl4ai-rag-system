@@ -1,6 +1,6 @@
 # db.py
 import chromadb
-from chromadb.config import Settings, System
+from chromadb.config import Settings
 
 
 def get_chroma_client():

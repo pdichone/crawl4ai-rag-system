@@ -119,6 +119,8 @@ def initialize_session_state():
         st.session_state.current_progress = 0
     if "total_urls" not in st.session_state:
         st.session_state.total_urls = 0
+    if "suggested_questions" not in st.session_state:
+        st.session_state.suggested_questions = None
 
 
 def initialize_with_existing_data():
@@ -245,6 +247,67 @@ async def process_url(url: str):
         st.error(f"Error processing URL: {str(e)}")
 
 
+def generate_contextual_questions(collection) -> list[str]:
+    """Generate contextual questions based on the content in ChromaDB."""
+    try:
+        # Get a sample of documents from the collection
+        results = collection.get(
+            include=["documents", "metadatas"],
+            limit=10,  # Limit to avoid processing too much
+        )
+
+        if not results["documents"]:
+            return []
+
+        # Prepare a prompt for the OpenAI API
+        content_summary = "\n".join(
+            results["documents"][:3]
+        )  # Use first 3 docs as sample
+        domains = set(meta["source"] for meta in results["metadatas"])
+
+        # Create system message that will generate relevant questions
+        messages = [
+            {
+                "role": "system",
+                "content": """You are a helpful AI that generates relevant questions 
+             based on a corpus of documents. Generate 4-5 specific questions that can be answered 
+             from the provided content. Questions should be diverse and specific to the actual content.""",
+            },
+            {
+                "role": "user",
+                "content": f"""Based on content from these domains: {', '.join(domains)}
+             and this sample content: {content_summary[:1000]}...
+             
+             Generate 4-5 specific, contextual questions that could be answered from this knowledge base.
+             Format as a simple list with each question on a new line starting with a hyphen.
+             Make questions specific to the actual content, not generic.""",
+            },
+        ]
+
+        # Get completion from OpenAI
+        # client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        # openai_client
+        response = openai_client.chat.completions.create(
+            model="gpt-4o-mini", messages=messages, temperature=0.7, max_tokens=200
+        )
+
+        # Extract and format questions
+        questions = response.choices[0].message.content.strip().split("\n")
+        # Clean up questions (remove leading/trailing spaces and dashes)
+        questions = [q.strip("- ").strip() for q in questions if q.strip()]
+
+        return questions
+
+    except Exception as e:
+        print(f"Error generating contextual questions: {e}")
+        return [
+            "What are the main topics covered in these documents?",
+            "Can you summarize the key points from the loaded content?",
+            "What specific information can I find in these documents?",
+            "What are the most important concepts discussed in this content?",
+        ]
+
+
 async def main():
     st.set_page_config(
         page_title="Dynamic RAG Chat System", page_icon="🤖", layout="wide"
@@ -326,6 +389,9 @@ async def main():
                     st.session_state.processing_complete = False
                     st.session_state.urls_processed = set()
                     st.session_state.messages = []
+                    st.session_state.suggested_questions = (
+                        None  # Clear suggested questions
+                    )
                     st.success("Database cleared successfully!")
                     # Force page refresh to update stats
                     st.rerun()
@@ -339,59 +405,130 @@ async def main():
                 st.session_state.urls_processed.add(url_input)
                 st.session_state.processing_complete = True
                 st.session_state.is_processing = False
+                st.session_state.suggested_questions = (
+                    None  # Reset questions to regenerate
+                )
                 st.rerun()  # Refresh to update stats
             else:
                 st.warning("This URL has already been processed!")
 
-        # Display processed URLs
+        # Display processed URLs with truncation
         if st.session_state.urls_processed:
             st.subheader("Processed URLs:")
-            for processed_url in st.session_state.urls_processed:
-                st.write(f"✓ {processed_url}")
+            urls_list = list(st.session_state.urls_processed)
+            # Show first 3 URLs
+            for url in urls_list[:3]:
+                st.write(f"✓ {url}")
+            # If there are more URLs, show the count and add expander
+            remaining = len(urls_list) - 3
+            if remaining > 0:
+                st.write(f"_...and {remaining} more_")
+                with st.expander("Show all URLs"):
+                    for url in urls_list[3:]:
+                        st.write(f"✓ {url}")
 
     with chat_col:
         if st.session_state.processing_complete:
-            st.subheader("Chat Interface")
+            # Create a container for the entire chat interface
+            chat_container = st.container()
 
-            # Add suggested questions based on content
-            with st.expander("📝 Suggested Questions", expanded=False):
+            with chat_container:
+                st.subheader("Chat Interface")
+
+                # Add suggested questions based on content
+                with st.expander("📝 Suggested Questions", expanded=False):
+                    if existing_data and existing_data["doc_count"] > 0:
+                        # Only generate new questions if they don't exist or if the database has changed
+                        if st.session_state.suggested_questions is None:
+                            st.session_state.suggested_questions = (
+                                generate_contextual_questions(chroma_collection)
+                            )
+
+                        st.markdown("Try asking:")
+                        for question in st.session_state.suggested_questions:
+                            st.markdown(f"- {question}")
+
+                        # Add a refresh button
+                        if st.button("🔄 Refresh Suggestions"):
+                            st.session_state.suggested_questions = (
+                                generate_contextual_questions(chroma_collection)
+                            )
+                            st.rerun()
+                    else:
+                        st.markdown(
+                            "Process some URLs to get contextual question suggestions."
+                        )
+
+                # Create a messages container with fixed height and scrolling
+                messages_container = st.container()
+
+                # Add CSS for scrollable container
                 st.markdown(
                     """
-                Try asking:
-                - "What topics are covered in the knowledge base?"
-                - "Can you summarize the main content from [specific domain]?"
-                - "What are the key concepts discussed across these documents?"
-                - "Find information about [specific topic] from these sources"
-                """
+                    <style>
+                        .stChatMessageContent {
+                            max-height: 400px;
+                            overflow-y: auto;
+                        }
+                    </style>
+                """,
+                    unsafe_allow_html=True,
                 )
 
-            # Display existing messages
-            for msg in st.session_state.messages:
-                if isinstance(msg, ModelRequest) or isinstance(msg, ModelResponse):
-                    for part in msg.parts:
-                        display_message_part(part)
+                with messages_container:
+                    # Display existing messages
+                    for msg in st.session_state.messages:
+                        if isinstance(msg, ModelRequest) or isinstance(
+                            msg, ModelResponse
+                        ):
+                            for part in msg.parts:
+                                display_message_part(part)
 
-            # Chat input
-            user_input = st.chat_input(
-                "Ask a question about the processed content...",
-                disabled=st.session_state.is_processing,
-            )
-
-            if user_input:
-                st.session_state.messages.append(
-                    ModelRequest(parts=[UserPromptPart(content=user_input)])
+                # Add some spacing before the input
+                st.markdown(
+                    "<div style='padding: 3rem;'></div>", unsafe_allow_html=True
                 )
 
-                with st.chat_message("user"):
-                    st.markdown(user_input)
+                # Create a container for input at the bottom
+                input_container = st.container()
+                with input_container:
+                    # Chat input
+                    user_input = st.chat_input(
+                        "Ask a question about the processed content...",
+                        disabled=st.session_state.is_processing,
+                    )
 
-                with st.chat_message("assistant"):
-                    await run_agent_with_streaming(user_input)
+                    if user_input:
+                        st.session_state.messages.append(
+                            ModelRequest(parts=[UserPromptPart(content=user_input)])
+                        )
 
-            # Clear chat button
-            if st.button("Clear Chat History"):
-                st.session_state.messages = []
-                st.rerun()
+                        with st.chat_message("user"):
+                            st.markdown(user_input)
+
+                        with st.chat_message("assistant"):
+                            await run_agent_with_streaming(user_input)
+
+                        # Auto-scroll to bottom after new message
+                        js = """
+                        <script>
+                            function scrollToBottom() {
+                                const messages = document.querySelector('.stChatMessageContent');
+                                if (messages) {
+                                    messages.scrollTop = messages.scrollHeight;
+                                }
+                            }
+                            setTimeout(scrollToBottom, 100);
+                        </script>
+                        """
+                        st.markdown(js, unsafe_allow_html=True)
+
+                # Clear chat button - moved to bottom
+                col1, col2, col3 = st.columns([3, 2, 3])
+                with col2:
+                    if st.button("Clear Chat History", use_container_width=True):
+                        st.session_state.messages = []
+                        st.rerun()
         else:
             if existing_data:
                 st.info("The knowledge base is ready! Start asking questions below.")

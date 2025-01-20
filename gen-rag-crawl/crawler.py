@@ -1,6 +1,5 @@
 # crawler.py
 import os
-import sys
 import json
 import asyncio
 import requests

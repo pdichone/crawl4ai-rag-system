@@ -21,6 +21,7 @@ model = OpenAIModel(llm)
 logfire.configure(send_to_logfire="if-token-present")
 
 
+
 @dataclass
 class PydanticAIDeps:
     collection: Collection
