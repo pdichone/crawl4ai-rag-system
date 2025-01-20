@@ -77,6 +77,11 @@ target/
 # Jupyter Notebook
 .ipynb_checkpoints
 
+# igonore chroma_db 
+chroma_db/
+
+
+
 # IPython
 profile_default/
 ipython_config.py
